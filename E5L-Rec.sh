@@ -133,12 +133,11 @@ install_tools() {
 }
 
 check_github_token() {
-    if [ -z "$GITHUB_TOKEN" ]; then
-        error "GITHUB_TOKEN is not set. Set it in ~/.bashrc or config.sh"
+    if [ -z "$GITHUB_TOKEN" ] || [ "$GITHUB_TOKEN" = "your_personal_access_token" ]; then
+        error "GITHUB_TOKEN is not set or invalid in config.sh. Set a valid token in config.sh (GitHub > Settings > Developer settings > Personal access tokens, enable 'repo' scope)."
     fi
-    # Basic token validation (check format)
     if ! echo "$GITHUB_TOKEN" | grep -q "^github_pat_"; then
-        error "Invalid GITHUB_TOKEN format"
+        error "Invalid GITHUB_TOKEN format in config.sh. It should start with 'github_pat_'."
     fi
 }
 
@@ -159,7 +158,7 @@ enumerate_subdomains() {
 
     if [ "$RUN_GITHUB_SUBDOMAINS" = "true" ]; then
         check_github_token
-        timeout 300 github-subdomains -d "$domain" > "$output_dir/subs_github.txt" 2>>"$output_dir/errors.log" &
+        timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" github-subdomains -d "$domain" > "$output_dir/subs_github.txt" 2>>"$output_dir/errors.log" &
         log "${GREEN}[+] Running github-subdomains...${NC}"
     fi
 
@@ -348,7 +347,7 @@ extract_github_endpoints() {
 
     check_github_token
     log "${GREEN}[+] Extracting GitHub endpoints...${NC}"
-    timeout 300 github-endpoints -d "$domain" > "$output_dir/github_endpoints.txt" 2>>"$output_dir/errors.log"
+    timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" github-endpoints -d "$domain" > "$output_dir/github_endpoints.txt" 2>>"$output_dir/errors.log"
     count=$(wc -l < "$output_dir/github_endpoints.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count endpoints${NC}"
 }
@@ -359,7 +358,7 @@ scan_github_for_secrets() {
 
     check_github_token
     log "${GREEN}[+] Scanning GitHub for secrets...${NC}"
-    timeout 300 trufflehog github --repo https://github.com/search?q="$domain" --json > "$output_dir/trufflehog_output.json" 2>>"$output_dir/errors.log" || log "${YELLOW}[-] TruffleHog scan failed${NC}"
+    timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" trufflehog github --repo https://github.com/search?q="$domain" --json > "$output_dir/trufflehog_output.json" 2>>"$output_dir/errors.log" || log "${YELLOW}[-] TruffleHog scan failed${NC}"
     count=$(grep -c '"DetectorName"' "$output_dir/trufflehog_output.json" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count secrets${NC}"
     chmod 600 "$output_dir/trufflehog_output.json"
