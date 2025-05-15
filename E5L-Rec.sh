@@ -1,47 +1,71 @@
 #!/bin/bash
 
+# ========== WARNING ==========
+echo -e "\033[1;33m[!] Ensure you have permission to scan \$TARGET_DOMAIN. Unauthorized scanning is illegal.\033[0m"
+
 # ========== CONFIGURATION ==========
-# Source configuration file (config.sh)
 if [ -f "config.sh" ]; then
     source config.sh
 else
-    echo -e "\033[1;31m[-] Configuration file (config.sh) not found. Exiting...\033[0m"
+    echo -e "\033[1;31m[-] config.sh not found. Exiting...\033[0m"
     exit 1
 fi
+
+# Default config values if not set
+VERBOSE=${VERBOSE:-true}
+RUN_AMASS=${RUN_AMASS:-false}
+RUN_GITHUB_SUBDOMAINS=${RUN_GITHUB_SUBDOMAINS:-true}
 
 # ========== COLORS ==========
 GREEN="\033[1;32m"
 RED="\033[1;31m"
+YELLOW="\033[1;33m"
 NC="\033[0m"
 
 # ========== FUNCTIONS ==========
-# Function to check if a command exists
+log() {
+    if [ "$VERBOSE" = "true" ]; then
+        echo -e "$1" | tee -a "$OUTPUT_DIR/recon.log"
+    else
+        echo -e "$1" >> "$OUTPUT_DIR/recon.log"
+    fi
+}
+
+error() {
+    echo -e "${RED}[-] $1${NC}" | tee -a "$OUTPUT_DIR/errors.log"
+    exit 1
+}
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Function to install Go-based tools
 install_go_tool() {
     local tool=$1
     local package=$2
     if ! command_exists "$tool"; then
-        echo -e "${RED}[-] Installing $tool...${NC}"
-        go install "$package" || { echo -e "${RED}[-] Failed to install $tool${NC}"; exit 1; }
+        log "${YELLOW}[-] Installing $tool...${NC}"
+        go install "$package" || error "Failed to install $tool"
         export PATH=$PATH:$(go env GOPATH)/bin
+        log "${GREEN}[+] $tool installed${NC}"
     fi
 }
 
-# Function to install tools (if not already installed)
 install_tools() {
-    echo -e "${GREEN}[+] Checking and installing tools...${NC}"
-    tools=(subfinder assetfinder amass httpx hakrawler gau waybackurls gf github-subdomains github-endpoints)
+    log "${GREEN}[+] Checking and installing tools...${NC}"
+    tools=(subfinder assetfinder httpx hakrawler gau waybackurls gf github-subdomains github-endpoints dnsx naabu dirsearch)
+    if [ "$RUN_AMASS" = "true" ]; then
+        tools+=(amass)
+    fi
 
-    # Install tools if missing
     for tool in "${tools[@]}"; do
         if ! command_exists "$tool"; then
             case $tool in
                 subfinder)
                     install_go_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+                    # Create subfinder config for faster APIs
+                    mkdir -p ~/.config/subfinder
+                    echo -e "resolvers:\n  - 8.8.8.8\n  - 1.1.1.1\nsources:\n  - certspotter\n  - crtsh\n  - hackertarget" > ~/.config/subfinder/config.yaml
                     ;;
                 assetfinder)
                     install_go_tool assetfinder github.com/tomnomnom/assetfinder@latest
@@ -63,7 +87,6 @@ install_tools() {
                     ;;
                 gf)
                     install_go_tool gf github.com/tomnomnom/gf@latest
-                    # Optionally configure gf patterns
                     if [ ! -d ~/.gf ]; then
                         git clone https://github.com/1ndianl33t/Gf-Patterns /tmp/Gf-Patterns
                         mkdir -p ~/.gf
@@ -77,155 +100,341 @@ install_tools() {
                 github-endpoints)
                     install_go_tool github-endpoints github.com/gwen001/github-endpoints@latest
                     ;;
+                dnsx)
+                    install_go_tool dnsx github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+                    ;;
+                naabu)
+                    install_go_tool naabu github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+                    ;;
+                dirsearch)
+                    if [ ! -d /opt/dirsearch ]; then
+                        log "${YELLOW}[-] Installing dirsearch...${NC}"
+                        git clone https://github.com/maurosoria/dirsearch.git /opt/dirsearch
+                        pip3 install -r /opt/dirsearch/requirements.txt || error "Failed to install dirsearch"
+                        ln -s /opt/dirsearch/dirsearch.py /usr/local/bin/dirsearch
+                        log "${GREEN}[+] dirsearch installed${NC}"
+                    fi
+                    ;;
             esac
         fi
     done
 
-    # Install trufflehog (Python-based)
     if ! command_exists trufflehog; then
-        echo -e "${RED}[-] Installing trufflehog...${NC}"
-        pip3 install trufflehog >/dev/null 2>&1 || { echo -e "${RED}[-] Failed to install trufflehog${NC}"; exit 1; }
+        log "${YELLOW}[-] Installing trufflehog...${NC}"
+        pip3 install trufflehog >/dev/null 2>&1 || error "Failed to install trufflehog"
+        log "${GREEN}[+] trufflehog installed${NC}"
     fi
 
-    # Ensure basic tools are installed
     for tool in git curl grep; do
         if ! command_exists "$tool"; then
-            echo -e "${RED}[-] $tool is required. Please install it (e.g., sudo apt install $tool).${NC}"
-            exit 1
+            error "$tool is required. Install it (e.g., sudo apt install $tool)"
         fi
     done
 }
 
-# Function to enumerate subdomains
+check_github_token() {
+    if [ -z "$GITHUB_TOKEN" ]; then
+        error "GITHUB_TOKEN is not set. Set it in ~/.bashrc or config.sh"
+    fi
+    # Basic token validation (check format)
+    if ! echo "$GITHUB_TOKEN" | grep -q "^github_pat_"; then
+        error "Invalid GITHUB_TOKEN format"
+    fi
+}
+
 enumerate_subdomains() {
     local domain=$1
     local output_dir=$2
 
-    echo -e "${GREEN}[+] Enumerating subdomains for $domain...${NC}"
-    subfinder -d "$domain" -silent > "$output_dir/subs_subfinder.txt" 2>/dev/null
-    assetfinder --subs-only "$domain" > "$output_dir/subs_assetfinder.txt" 2>/dev/null
-    amass enum -passive -d "$domain" > "$output_dir/subs_amass.txt" 2>/dev/null
-    github-subdomains -d "$domain" > "$output_dir/subs_github.txt" 2>/dev/null
-    cat "$output_dir/subs_"*".txt" | sort -u > "$output_dir/subs.txt"
-    rm "$output_dir/subs_"*".txt"
+    log "${GREEN}[+] Enumerating subdomains for $domain...${NC}"
+    > "$output_dir/subs_subfinder.txt"
+    > "$output_dir/subs_assetfinder.txt"
+    > "$output_dir/subs_github.txt"
+    > "$output_dir/subs_amass.txt"
+
+    timeout 300 subfinder -d "$domain" -silent > "$output_dir/subs_subfinder.txt" 2>>"$output_dir/errors.log" &
+    log "${GREEN}[+] Running subfinder...${NC}"
+    timeout 300 assetfinder --subs-only "$domain" > "$output_dir/subs_assetfinder.txt" 2>>"$output_dir/errors.log" &
+    log "${GREEN}[+] Running assetfinder...${NC}"
+
+    if [ "$RUN_GITHUB_SUBDOMAINS" = "true" ]; then
+        check_github_token
+        timeout 300 github-subdomains -d "$domain" > "$output_dir/subs_github.txt" 2>>"$output_dir/errors.log" &
+        log "${GREEN}[+] Running github-subdomains...${NC}"
+    fi
+
+    if [ "$RUN_AMASS" = "true" ]; then
+        timeout 600 amass enum -passive -d "$domain" -o "$output_dir/subs_amass_raw.txt" 2>>"$output_dir/errors.log" &
+        log "${GREEN}[+] Running amass...${NC}"
+    fi
+
+    wait
+
+    if [ "$RUN_AMASS" = "true" ] && [ -f "$output_dir/subs_amass_raw.txt" ]; then
+        grep -E "^[a-zA-Z0-9.-]+\.${domain}$" "$output_dir/subs_amass_raw.txt" > "$output_dir/subs_amass.txt" 2>>"$output_dir/errors.log"
+        rm -f "$output_dir/subs_amass_raw.txt"
+    fi
+
+    for file in "$output_dir/subs_subfinder.txt" "$output_dir/subs_assetfinder.txt" "$output_dir/subs_github.txt" "$output_dir/subs_amass.txt"; do
+        if [ -f "$file" ] && [ -s "$file" ]; then
+            count=$(wc -l < "$file")
+            tool=$(basename "$file" | sed 's/subs_//;s/\.txt//')
+            log "${GREEN}[+] Found $count subdomains with $tool${NC}"
+        fi
+    done
+
+    log "${GREEN}[+] Combining and deduplicating subdomains...${NC}"
+    cat "$output_dir/subs_"*".txt" 2>/dev/null | sort -u -S 50M > "$output_dir/subs.txt" 2>>"$output_dir/errors.log"
+    rm -f "$output_dir/subs_"*".txt"
+    count=$(wc -l < "$output_dir/subs.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Total subdomains: $count${NC}"
 }
 
-# Function to check live subdomains
+resolve_dns() {
+    local subs_file=$1
+    local output_dir=$2
+
+    if [ ! -f "$subs_file" ] || [ ! -s "$subs_file" ]; then
+        log "${YELLOW}[-] No subdomains found for DNS resolution${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Resolving DNS for subdomains...${NC}"
+    cat "$subs_file" | dnsx -silent -a -aaaa -resp > "$output_dir/dns.txt" 2>>"$output_dir/errors.log"
+    count=$(wc -l < "$output_dir/dns.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count IPs for subdomains${NC}"
+}
+
 check_live_subdomains() {
     local subs_file=$1
     local output_dir=$2
 
-    echo -e "${GREEN}[+] Checking live subdomains...${NC}"
-    cat "$subs_file" | httpx -silent -mc 200,302,403 > "$output_dir/live.txt" 2>/dev/null
+    if [ ! -f "$subs_file" ] || [ ! -s "$subs_file" ]; then
+        log "${YELLOW}[-] No subdomains found for live check${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Checking live subdomains...${NC}"
+    cat "$subs_file" | httpx -silent -mc 200,302,403 > "$output_dir/live.txt" 2>>"$output_dir/errors.log"
+    count=$(wc -l < "$output_dir/live.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count live hosts${NC}"
 }
 
-# Function to extract JavaScript files
+check_security_headers() {
+    local live_file=$1
+    local output_dir=$2
+
+    if [ ! -f "$live_file" ] || [ ! -s "$live_file" ]; then
+        log "${YELLOW}[-] No live hosts found for header check${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Checking security headers...${NC}"
+    cat "$live_file" | httpx -silent -sc -cl > "$output_dir/headers.txt" 2>>"$output_dir/errors.log"
+    count=$(wc -l < "$output_dir/headers.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Analyzed headers for $count hosts${NC}"
+}
+
+scan_ports() {
+    local live_file=$1
+    local output_dir=$2
+
+    if [ ! -f "$live_file" ] || [ ! -s "$live_file" ]; then
+        log "${YELLOW}[-] No live hosts found for port scanning${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Scanning ports on live hosts...${NC}"
+    cat "$live_file" | naabu -silent -p 80,443,8080 > "$output_dir/ports.txt" 2>>"$output_dir/errors.log"
+    count=$(wc -l < "$output_dir/ports.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found open ports on $count hosts${NC}"
+}
+
 extract_js_files() {
     local live_file=$1
     local output_dir=$2
 
-    echo -e "${GREEN}[+] Extracting JS files from live hosts...${NC}"
-    cat "$live_file" | hakrawler -js -depth 2 2>/dev/null | sort -u > "$output_dir/js_files.txt"
+    if [ ! -f "$live_file" ] || [ ! -s "$live_file" ]; then
+        log "${YELLOW}[-] No live hosts found for JS extraction${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Extracting JS files...${NC}"
+    cat "$live_file" | hakrawler -js -depth 2 2>>"$output_dir/errors.log" | sort -u > "$output_dir/js_files.txt"
+    count=$(wc -l < "$output_dir/js_files.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count JS files${NC}"
 }
 
-# Function to scan JS files for secrets
 scan_js_for_secrets() {
     local js_file=$1
     local output_dir=$2
 
-    echo -e "${GREEN}[+] Scanning JS for secrets...${NC}"
+    if [ ! -f "$js_file" ] || [ ! -s "$js_file" ]; then
+        log "${YELLOW}[-] No JS files found for secret scanning${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Scanning JS for secrets...${NC}"
     > "$output_dir/secrets.txt"
     while read -r js; do
         echo "[JS] $js" >> "$output_dir/secrets.txt"
-        curl -s "$js" | grep -Ei "api[_-]?key|secret|token|authorization|bearer|access[_-]?token" >> "$output_dir/secrets.txt" 2>/dev/null
+        curl -s "$js" --connect-timeout 5 | grep -Ei "api[_-]?key|secret|token|authorization|bearer|access[_-]?token" >> "$output_dir/secrets.txt" 2>>"$output_dir/errors.log"
     done < "$js_file"
+    count=$(grep -c '^[JS]' "$output_dir/secrets.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count potential secrets${NC}"
+    chmod 600 "$output_dir/secrets.txt"
 }
 
-# Function to collect historical URLs
+enumerate_directories() {
+    local live_file=$1
+    local output_dir=$2
+
+    if [ ! -f "$live_file" ] || [ ! -s "$live_file" ]; then
+        log "${YELLOW}[-] No live hosts found for directory enumeration${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Enumerating directories...${NC}"
+    > "$output_dir/dirs.txt"
+    while read -r url; do
+        dirsearch -u "$url" -e php,asp,aspx,js,html -t 10 --simple-report="$output_dir/dirs_tmp.txt" 2>>"$output_dir/errors.log"
+        if [ -f "$output_dir/dirs_tmp.txt" ]; then
+            cat "$output_dir/dirs_tmp.txt" >> "$output_dir/dirs.txt"
+            rm -f "$output_dir/dirs_tmp.txt"
+        fi
+        sleep 1 # Rate limiting
+    done < "$live_file"
+    count=$(wc -l < "$output_dir/dirs.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count directories${NC}"
+}
+
 collect_historical_urls() {
     local subs_file=$1
     local output_dir=$2
 
-    echo -e "${GREEN}[+] Collecting URLs (gau + wayback)...${NC}"
-    (cat "$subs_file" | gau && cat "$subs_file" | waybackurls) | sort -u > "$output_dir/all_urls.txt" 2>/dev/null
+    if [ ! -f "$subs_file" ] || [ ! -s "$subs_file" ]; then
+        log "${YELLOW}[-] No subdomains found for URL collection${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Collecting historical URLs...${NC}"
+    (cat "$subs_file" | timeout 300 gau && cat "$subs_file" | timeout 300 waybackurls) 2>>"$output_dir/errors.log" | sort -u -S 50M > "$output_dir/all_urls.txt"
+    count=$(wc -l < "$output_dir/all_urls.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count URLs${NC}"
 }
 
-# Function to filter URLs with GF patterns
 filter_with_gf() {
     local urls_file=$1
     local output_dir=$2
 
-    echo -e "${GREEN}[+] Filtering with GF patterns...${NC}"
+    if [ ! -f "$urls_file" ] || [ ! -s "$urls_file" ]; then
+        log "${YELLOW}[-] No URLs found for GF filtering${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Filtering URLs with GF patterns...${NC}"
     mkdir -p "$output_dir/gf_matches"
     patterns=(xss sqli ssrf redirect lfi idor)
     for p in "${patterns[@]}"; do
-        cat "$urls_file" | gf "$p" > "$output_dir/gf_matches/$p.txt" 2>/dev/null
+        cat "$urls_file" | gf "$p" > "$output_dir/gf_matches/$p.txt" 2>>"$output_dir/errors.log"
+        count=$(wc -l < "$output_dir/gf_matches/$p.txt" 2>/dev/null || echo 0)
+        log "${GREEN}[+] Found $count $p matches${NC}"
     done
 }
 
-# Function to extract GitHub endpoints
 extract_github_endpoints() {
     local domain=$1
     local output_dir=$2
 
-    echo -e "${GREEN}[+] Extracting endpoints from GitHub...${NC}"
-    github-endpoints -d "$domain" > "$output_dir/github_endpoints.txt" 2>/dev/null
+    check_github_token
+    log "${GREEN}[+] Extracting GitHub endpoints...${NC}"
+    timeout 300 github-endpoints -d "$domain" > "$output_dir/github_endpoints.txt" 2>>"$output_dir/errors.log"
+    count=$(wc -l < "$output_dir/github_endpoints.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count endpoints${NC}"
 }
 
-# Function to scan GitHub for secrets
 scan_github_for_secrets() {
     local domain=$1
     local output_dir=$2
 
-    echo -e "${GREEN}[+] Scanning GitHub for secrets...${NC}"
-    trufflehog github --repo https://github.com/search?q="$domain" --json > "$output_dir/trufflehog_output.json" 2>/dev/null || echo "TruffleHog scan failed."
+    check_github_token
+    log "${GREEN}[+] Scanning GitHub for secrets...${NC}"
+    timeout 300 trufflehog github --repo https://github.com/search?q="$domain" --json > "$output_dir/trufflehog_output.json" 2>>"$output_dir/errors.log" || log "${YELLOW}[-] TruffleHog scan failed${NC}"
+    count=$(grep -c '"DetectorName"' "$output_dir/trufflehog_output.json" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count secrets${NC}"
+    chmod 600 "$output_dir/trufflehog_output.json"
 }
 
-# Function to generate a summary report
 generate_report() {
     local output_dir=$1
 
-    echo -e "${GREEN}[+] Generating summary report...${NC}"
-    echo "Reconnaissance Report for $TARGET_DOMAIN" > "$output_dir/report.txt"
-    echo "" >> "$output_dir/report.txt"
-    echo "Subdomains found: $(wc -l < "$output_dir/subs.txt" 2>/dev/null || echo 0)" >> "$output_dir/report.txt"
-    echo "Live hosts found: $(wc -l < "$output_dir/live.txt" 2>/dev/null || echo 0)" >> "$output_dir/report.txt"
-    echo "JS files extracted: $(wc -l < "$output_dir/js_files.txt" 2>/dev/null || echo 0)" >> "$output_dir/report.txt"
-    echo "Secrets found in JS: $(grep -c '^[JS]' "$output_dir/secrets.txt" 2>/dev/null || echo 0)" >> "$output_dir/report.txt"
-    echo "Historical URLs collected: $(wc -l < "$output_dir/all_urls.txt" 2>/dev/null || echo 0)" >> "$output_dir/report.txt"
-    echo "GF matches:" >> "$output_dir/report.txt"
+    log "${GREEN}[+] Generating summary report...${NC}"
+    report="$output_dir/report.txt"
+    echo "Reconnaissance Report for $TARGET_DOMAIN" > "$report"
+    echo "Generated on $(date)" >> "$report"
+    echo "" >> "$report"
+    echo "Subdomains found: $(wc -l < "$output_dir/subs.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "IPs resolved: $(wc -l < "$output_dir/dns.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "Live hosts found: $(wc -l < "$output_dir/live.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "Security headers analyzed: $(wc -l < "$output_dir/headers.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "Open ports found: $(wc -l < "$output_dir/ports.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "JS files extracted: $(wc -l < "$output_dir/js_files.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "Secrets found in JS: $(grep -c '^[JS]' "$output_dir/secrets.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "Directories found: $(wc -l < "$output_dir/dirs.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "Historical URLs collected: $(wc -l < "$output_dir/all_urls.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "GF matches:" >> "$report"
     for file in "$output_dir/gf_matches/"*.txt; do
         if [ -f "$file" ]; then
-            echo "  - $(basename "$file"): $(wc -l < "$file" 2>/dev/null || echo 0) matches" >> "$output_dir/report.txt"
+            echo "  - $(basename "$file"): $(wc -l < "$file" 2>/dev/null || echo 0) matches" >> "$report"
         fi
     done
-    echo "GitHub endpoints found: $(wc -l < "$output_dir/github_endpoints.txt" 2>/dev/null || echo 0)" >> "$output_dir/report.txt"
-    echo "" >> "$output_dir/report.txt"
-    echo "Check the following directories for detailed results:" >> "$output_dir/report.txt"
-    echo "- subs.txt: Subdomains" >> "$output_dir/report.txt"
-    echo "- live.txt: Live hosts" >> "$output_dir/report.txt"
-    echo "- js_files.txt: JavaScript files" >> "$output_dir/report.txt"
-    echo "- secrets.txt: Secrets in JS" >> "$output_dir/report.txt"
-    echo "- all_urls.txt: Gau + wayback URLs" >> "$output_dir/report.txt"
-    echo "- gf_matches/: Param fuzzing sets" >> "$output_dir/report.txt"
-    echo "- github_endpoints.txt: Endpoints from GitHub" >> "$output_dir/report.txt"
-    echo "- trufflehog_output.json: GitHub secrets (JSON)" >> "$output_dir/report.txt"
+    echo "GitHub endpoints found: $(wc -l < "$output_dir/github_endpoints.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "GitHub secrets found: $(grep -c '"DetectorName"' "$output_dir/trufflehog_output.json" 2>/dev/null || echo 0)" >> "$report"
+    echo "" >> "$report"
+    echo "Check the following files for detailed results:" >> "$report"
+    echo "- subs.txt: Subdomains" >> "$report"
+    echo "- dns.txt: DNS resolutions" >> "$report"
+    echo "- live.txt: Live hosts" >> "$report"
+    echo "- headers.txt: Security headers" >> "$report"
+    echo "- ports.txt: Open ports" >> "$report"
+    echo "- js_files.txt: JavaScript files" >> "$report"
+    echo "- secrets.txt: Secrets in JS" >> "$report"
+    echo "- dirs.txt: Directories" >> "$report"
+    echo "- all_urls.txt: Historical URLs" >> "$report"
+    echo "- gf_matches/: Param fuzzing sets" >> "$report"
+    echo "- github_endpoints.txt: GitHub endpoints" >> "$report"
+    echo "- trufflehog_output.json: GitHub secrets" >> "$report"
+    echo "- recon.log: Execution log" >> "$report"
+    echo "- errors.log: Error log" >> "$report"
+    log "${GREEN}[+] Report saved to $report${NC}"
+    chmod 600 "$report"
 }
 
 # ========== MAIN WORKFLOW ==========
-# Create output directory
 mkdir -p "$OUTPUT_DIR"
+touch "$OUTPUT_DIR/recon.log" "$OUTPUT_DIR/errors.log"
+chmod 600 "$OUTPUT_DIR/recon.log" "$OUTPUT_DIR/errors.log"
 
-# Install tools (if needed)
 install_tools
 
-# Perform reconnaissance tasks
 if [ "${RUN_ENUMERATE_SUBDOMAINS}" = "true" ]; then
     enumerate_subdomains "$TARGET_DOMAIN" "$OUTPUT_DIR"
 fi
 
+if [ "${RUN_RESOLVE_DNS}" = "true" ]; then
+    resolve_dns "$OUTPUT_DIR/subs.txt" "$OUTPUT_DIR"
+fi
+
 if [ "${RUN_CHECK_LIVE_SUBDOMAINS}" = "true" ]; then
     check_live_subdomains "$OUTPUT_DIR/subs.txt" "$OUTPUT_DIR"
+fi
+
+if [ "${RUN_CHECK_SECURITY_HEADERS}" = "true" ]; then
+    check_security_headers "$OUTPUT_DIR/live.txt" "$OUTPUT_DIR"
+fi
+
+if [ "${RUN_SCAN_PORTS}" = "true" ]; then
+    scan_ports "$OUTPUT_DIR/live.txt" "$OUTPUT_DIR"
 fi
 
 if [ "${RUN_EXTRACT_JS_FILES}" = "true" ]; then
@@ -234,6 +443,10 @@ fi
 
 if [ "${RUN_SCAN_JS_FOR_SECRETS}" = "true" ]; then
     scan_js_for_secrets "$OUTPUT_DIR/js_files.txt" "$OUTPUT_DIR"
+fi
+
+if [ "${RUN_ENUMERATE_DIRECTORIES}" = "true" ]; then
+    enumerate_directories "$OUTPUT_DIR/live.txt" "$OUTPUT_DIR"
 fi
 
 if [ "${RUN_COLLECT_HISTORICAL_URLS}" = "true" ]; then
@@ -252,20 +465,25 @@ if [ "${RUN_SCAN_GITHUB_FOR_SECRETS}" = "true" ]; then
     scan_github_for_secrets "$TARGET_DOMAIN" "$OUTPUT_DIR"
 fi
 
-# Generate final report
 generate_report "$OUTPUT_DIR"
 
 # ========== DONE ==========
-echo -e "${GREEN}\n[✓] Recon complete!${NC}"
-echo -e "${GREEN}Files saved in: $OUTPUT_DIR${NC}"
-echo -e "${GREEN}Key files:${NC}"
-echo "- subs.txt           → Subdomains"
-echo "- live.txt           → Live hosts"
-echo "- js_files.txt       → JavaScript files"
-echo "- secrets.txt        → Secrets in JS"
-echo "- all_urls.txt       → Gau + wayback URLs"
-echo "- gf_matches/*.txt   → Param fuzzing sets"
-echo "- github_endpoints.txt → Endpoints from GitHub"
-echo "- trufflehog_output.json → GitHub secrets (JSON)"
+log "${GREEN}\n[✓] Recon complete!${NC}"
+log "${GREEN}Files saved in: $OUTPUT_DIR${NC}"
+log "${GREEN}Key files:${NC}"
+log "- subs.txt           → Subdomains"
+log "- dns.txt            → DNS resolutions"
+log "- live.txt           → Live hosts"
+log "- headers.txt        → Security headers"
+log "- ports.txt          → Open ports"
+log "- js_files.txt       → JavaScript files"
+log "- secrets.txt        → Secrets in JS"
+log "- dirs.txt           → Directories"
+log "- all_urls.txt       → Historical URLs"
+log "- gf_matches/*.txt   → Param fuzzing sets"
+log "- github_endpoints.txt → GitHub endpoints"
+log "- trufflehog_output.json → GitHub secrets"
+log "- recon.log          → Execution log"
+log "- errors.log         → Error log"
 
 exit 0
