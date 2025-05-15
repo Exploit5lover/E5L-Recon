@@ -53,7 +53,7 @@ install_go_tool() {
 
 install_tools() {
     log "${GREEN}[+] Checking and installing tools...${NC}"
-    tools=(subfinder assetfinder httpx katana gau waybackurls gf github-subdomains github-endpoints github-search dnsx naabu dirsearch)
+    tools=(subfinder assetfinder httpx katana gau waybackurls gf github-subdomains github-endpoints dnsx naabu dirsearch)
     if [ "$RUN_AMASS" = "true" ]; then
         tools+=(amass)
     fi
@@ -99,9 +99,6 @@ install_tools() {
                 github-endpoints)
                     install_go_tool github-endpoints github.com/gwen001/github-endpoints@latest
                     ;;
-                github-search)
-                    install_go_tool github-search github.com/gwen001/github-search@latest
-                    ;;
                 dnsx)
                     install_go_tool dnsx github.com/projectdiscovery/dnsx/cmd/dnsx@latest
                     ;;
@@ -120,6 +117,13 @@ install_tools() {
             esac
         fi
     done
+
+    if ! command_exists gh; then
+        log "${YELLOW}[-] Installing GitHub CLI (gh)...${NC}"
+        sudo apt update
+        sudo apt install -y gh || error "Failed to install GitHub CLI (gh)"
+        log "${GREEN}[+] GitHub CLI (gh) installed${NC}"
+    fi
 
     if ! command_exists trufflehog; then
         log "${YELLOW}[-] Installing trufflehog...${NC}"
@@ -389,13 +393,14 @@ scan_github_for_secrets() {
     > "$output_dir/repos.txt"
     > "$output_dir/trufflehog_output.json"
 
-    # Find repositories related to the domain
-    timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" github-search -t "$GITHUB_TOKEN" repos "$domain" > "$output_dir/repos_raw.txt" 2>>"$output_dir/errors.log"
-    if [ -s "$output_dir/repos_raw.txt" ]; then
-        grep "https://github.com/[^/]\+/[^/]\+" "$output_dir/repos_raw.txt" | head -n 10 > "$output_dir/repos.txt"
-    fi
-    rm -f "$output_dir/repos_raw.txt"
+    # Authenticate gh with GITHUB_TOKEN
+    echo "$GITHUB_TOKEN" | gh auth login --with-token 2>>"$output_dir/errors.log" || {
+        log "${RED}[-] Failed to authenticate GitHub CLI. Check GITHUB_TOKEN in config.sh.${NC}"
+        return
+    }
 
+    # Find repositories related to the domain
+    timeout 300 gh search repos "$domain" --limit 10 --json html_url --jq '.[].html_url' > "$output_dir/repos.txt" 2>>"$output_dir/errors.log"
     local repo_count
     repo_count=$(wc -l < "$output_dir/repos.txt" 2>/dev/null || echo 0)
     if [ "$repo_count" -eq 0 ]; then
