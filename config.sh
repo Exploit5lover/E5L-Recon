@@ -5,9 +5,6 @@
 # Ensure 'repo' scope is enabled
 GITHUB_TOKEN="your_personal_access_token"
 
-# Target domain for reconnaissance
-TARGET_DOMAIN="example.com"
-
 # Output directory (automatically includes date)
 OUTPUT_DIR="recon_$(date +%Y%m%d)"
 
@@ -33,3 +30,4 @@ RUN_COLLECT_HISTORICAL_URLS=true
 RUN_FILTER_WITH_GF=true
 RUN_EXTRACT_GITHUB_ENDPOINTS=true
 RUN_SCAN_GITHUB_FOR_SECRETS=true
+RUN_CHECK_SUBDOMAIN_TAKEOVER=true
