@@ -1,7 +1,7 @@
 # Configuration file for recon.sh
 
 # Target domain for reconnaissance
-TARGET_DOMAIN="example.com"
+TARGET_DOMAIN="crypto.com"
 
 # Output directory (automatically includes date)
 OUTPUT_DIR="recon_$(date +%Y%m%d)"
