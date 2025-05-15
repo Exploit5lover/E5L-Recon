@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ========== WARNING ==========
-echo -e "\033[1;33m[!] Ensure you have permission to scan \$TARGET_DOMAIN. Unauthorized scanning is illegal.\033[0m"
+echo -e "\033[1;33m[!] Ensure you have permission to scan the target domain. Unauthorized scanning is illegal.\033[0m"
 
 # ========== CONFIGURATION ==========
 if [ -f "config.sh" ]; then
@@ -11,10 +11,20 @@ else
     exit 1
 fi
 
+# Prompt for target domain
+echo -n "Enter target domain (e.g., example.com): "
+read TARGET_DOMAIN
+if ! echo "$TARGET_DOMAIN" | grep -qE '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
+    echo -e "\033[1;31m[-] Invalid domain format. Use example.com format.\033[0m"
+    exit 1
+fi
+echo -e "\033[1;32m[+] Target domain set to: $TARGET_DOMAIN\033[0m"
+
 # Default config values if not set
 VERBOSE=${VERBOSE:-true}
 RUN_AMASS=${RUN_AMASS:-false}
 RUN_GITHUB_SUBDOMAINS=${RUN_GITHUB_SUBDOMAINS:-true}
+RUN_CHECK_SUBDOMAIN_TAKEOVER=${RUN_CHECK_SUBDOMAIN_TAKEOVER:-true}
 
 # ========== COLORS ==========
 GREEN="\033[1;32m"
@@ -53,7 +63,7 @@ install_go_tool() {
 
 install_tools() {
     log "${GREEN}[+] Checking and installing tools...${NC}"
-    tools=(subfinder assetfinder httpx katana gau waybackurls gf github-subdomains github-endpoints dnsx naabu dirsearch)
+    tools=(subfinder assetfinder httpx katana gau waybackurls gf github-subdomains github-endpoints subjack dnsx naabu dirsearch)
     if [ "$RUN_AMASS" = "true" ]; then
         tools+=(amass)
     fi
@@ -98,6 +108,11 @@ install_tools() {
                     ;;
                 github-endpoints)
                     install_go_tool github-endpoints github.com/gwen001/github-endpoints@latest
+                    ;;
+                subjack)
+                    install_go_tool subjack github.com/haccer/subjack@latest
+                    # Download latest fingerprints for subjack
+                    curl -s https://raw.githubusercontent.com/haccer/subjack/master/fingerprints.json -o ~/.subjack/fingerprints.json || log "${YELLOW}[-] Failed to download subjack fingerprints${NC}"
                     ;;
                 dnsx)
                     install_go_tool dnsx github.com/projectdiscovery/dnsx/cmd/dnsx@latest
@@ -213,6 +228,26 @@ enumerate_subdomains() {
     rm -f "$output_dir/subs_"*".txt"
     count=$(wc -l < "$output_dir/subs.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Total subdomains: $count${NC}"
+}
+
+check_subdomain_takeover() {
+    local subs_file=$1
+    local output_dir=$2
+
+    if [ ! -f "$subs_file" ] || [ ! -s "$subs_file" ]; then
+        log "${YELLOW}[-] No subdomains found for takeover check${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Checking for subdomain takeovers...${NC}"
+    subjack -f "$subs_file" -c 10 -t 10 -o "$output_dir/takeovers.txt" -ssl -a 2>>"$output_dir/errors.log"
+    count=$(grep -c "Vulnerable" "$output_dir/takeovers.txt" 2>/dev/null || echo 0)
+    if [ "$count" -eq 0 ]; then
+        log "${YELLOW}[-] No subdomain takeovers found${NC}"
+    else
+        log "${GREEN}[+] Found $count vulnerable subdomains${NC}"
+    fi
+    chmod 600 "$output_dir/takeovers.txt"
 }
 
 resolve_dns() {
@@ -440,6 +475,7 @@ generate_report() {
     echo "Generated on $(date)" >> "$report"
     echo "" >> "$report"
     echo "Subdomains found: $(wc -l < "$output_dir/subs.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "Subdomain takeovers found: $(grep -c "Vulnerable" "$output_dir/takeovers.txt" 2>/dev/null || echo 0)" >> "$report"
     echo "IPs resolved: $(wc -l < "$output_dir/dns.txt" 2>/dev/null || echo 0)" >> "$report"
     echo "Live hosts found: $(wc -l < "$output_dir/live.txt" 2>/dev/null || echo 0)" >> "$report"
     echo "Security headers analyzed: $(wc -l < "$output_dir/headers.txt" 2>/dev/null || echo 0)" >> "$report"
@@ -459,6 +495,7 @@ generate_report() {
     echo "" >> "$report"
     echo "Check the following files for detailed results:" >> "$report"
     echo "- subs.txt: Subdomains" >> "$report"
+    echo "- takeovers.txt: Subdomain takeovers" >> "$report"
     echo "- dns.txt: DNS resolutions" >> "$report"
     echo "- live.txt: Live hosts" >> "$report"
     echo "- headers.txt: Security headers" >> "$report"
@@ -486,6 +523,10 @@ install_tools
 
 if [ "${RUN_ENUMERATE_SUBDOMAINS}" = "true" ]; then
     enumerate_subdomains "$TARGET_DOMAIN" "$OUTPUT_DIR"
+fi
+
+if [ "${RUN_CHECK_SUBDOMAIN_TAKEOVER}" = "true" ]; then
+    check_subdomain_takeover "$OUTPUT_DIR/subs.txt" "$OUTPUT_DIR"
 fi
 
 if [ "${RUN_RESOLVE_DNS}" = "true" ]; then
@@ -539,6 +580,7 @@ log "${GREEN}\n[✓] Recon complete!${NC}"
 log "${GREEN}Files saved in: $OUTPUT_DIR${NC}"
 log "${GREEN}Key files:${NC}"
 log "- subs.txt           → Subdomains"
+log "- takeovers.txt      → Subdomain takeovers"
 log "- dns.txt            → DNS resolutions"
 log "- live.txt           → Live hosts"
 log "- headers.txt        → Security headers"
