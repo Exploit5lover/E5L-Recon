@@ -1,7 +1,12 @@
 # Configuration file for recon.sh
 
+# GitHub personal access token (required for github-subdomains, github-endpoints, trufflehog)
+# Replace 'your_personal_access_token' with a valid token from GitHub > Settings > Developer settings > Personal access tokens
+# Ensure 'repo' scope is enabled
+GITHUB_TOKEN="your_personal_access_token"
+
 # Target domain for reconnaissance
-TARGET_DOMAIN="crypto.com"
+TARGET_DOMAIN="example.com"
 
 # Output directory (automatically includes date)
 OUTPUT_DIR="recon_$(date +%Y%m%d)"
