@@ -53,7 +53,7 @@ install_go_tool() {
 
 install_tools() {
     log "${GREEN}[+] Checking and installing tools...${NC}"
-    tools=(subfinder assetfinder httpx hakrawler gau waybackurls gf github-subdomains github-endpoints dnsx naabu dirsearch)
+    tools=(subfinder assetfinder httpx katana gau waybackurls gf github-subdomains github-endpoints github-search dnsx naabu dirsearch)
     if [ "$RUN_AMASS" = "true" ]; then
         tools+=(amass)
     fi
@@ -63,7 +63,6 @@ install_tools() {
             case $tool in
                 subfinder)
                     install_go_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-                    # Create subfinder config for faster APIs
                     mkdir -p ~/.config/subfinder
                     echo -e "resolvers:\n  - 8.8.8.8\n  - 1.1.1.1\nsources:\n  - certspotter\n  - crtsh\n  - hackertarget" > ~/.config/subfinder/config.yaml
                     ;;
@@ -76,8 +75,8 @@ install_tools() {
                 httpx)
                     install_go_tool httpx github.com/projectdiscovery/httpx/cmd/httpx@latest
                     ;;
-                hakrawler)
-                    install_go_tool hakrawler github.com/hakluke/hakrawler@latest
+                katana)
+                    install_go_tool katana github.com/projectdiscovery/katana/cmd/katana@latest
                     ;;
                 gau)
                     install_go_tool gau github.com/lc/gau@latest
@@ -99,6 +98,9 @@ install_tools() {
                     ;;
                 github-endpoints)
                     install_go_tool github-endpoints github.com/gwen001/github-endpoints@latest
+                    ;;
+                github-search)
+                    install_go_tool github-search github.com/gwen001/github-search@latest
                     ;;
                 dnsx)
                     install_go_tool dnsx github.com/projectdiscovery/dnsx/cmd/dnsx@latest
@@ -125,6 +127,14 @@ install_tools() {
         log "${GREEN}[+] trufflehog installed${NC}"
     fi
 
+    if ! command_exists secretfinder; then
+        log "${YELLOW}[-] Installing secretfinder...${NC}"
+        git clone https://github.com/m4ll0k/SecretFinder.git /opt/secretfinder
+        pip3 install -r /opt/secretfinder/requirements.txt || error "Failed to install secretfinder"
+        ln -s /opt/secretfinder/secretfinder.py /usr/local/bin/secretfinder
+        log "${GREEN}[+] secretfinder installed${NC}"
+    fi
+
     for tool in git curl grep; do
         if ! command_exists "$tool"; then
             error "$tool is required. Install it (e.g., sudo apt install $tool)"
@@ -139,6 +149,18 @@ check_github_token() {
     if ! echo "$GITHUB_TOKEN" | grep -q "^github_pat_"; then
         error "Invalid GITHUB_TOKEN format in config.sh. It should start with 'github_pat_'."
     fi
+    # Test token validity and rate limit
+    local response
+    response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user)
+    if echo "$response" | grep -q '"message": "Bad credentials"'; then
+        error "GITHUB_TOKEN is invalid. Generate a new token with 'repo' scope in GitHub > Settings > Developer settings > Personal access tokens."
+    fi
+    local rate_limit
+    rate_limit=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/rate_limit | grep '"remaining":' | head -1 | awk '{print $2}' | tr -d ',')
+    if [ "$rate_limit" -eq 0 ]; then
+        error "GITHUB_TOKEN rate limit exceeded. Wait for reset or use a different token."
+    fi
+    log "${GREEN}[+] GITHUB_TOKEN validated. Rate limit remaining: $rate_limit requests${NC}"
 }
 
 enumerate_subdomains() {
@@ -258,10 +280,13 @@ extract_js_files() {
         return
     fi
 
-    log "${GREEN}[+] Extracting JS files...${NC}"
-    cat "$live_file" | hakrawler -js -depth 2 2>>"$output_dir/errors.log" | sort -u > "$output_dir/js_files.txt"
+    log "${GREEN}[+] Extracting JS files with katana...${NC}"
+    cat "$live_file" | katana -silent -c 10 -d 5 -js-crawl -delay 100ms -f url | grep -Ei "\.js(\?|$)" > "$output_dir/js_files.txt" 2>>"$output_dir/errors.log"
     count=$(wc -l < "$output_dir/js_files.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count JS files${NC}"
+    if [ "$count" -eq 0 ]; then
+        log "${YELLOW}[-] No JS files found. Possible issues: anti-crawling measures, network errors, or insufficient memory. Check errors.log.${NC}"
+    fi
 }
 
 scan_js_for_secrets() {
@@ -273,13 +298,16 @@ scan_js_for_secrets() {
         return
     fi
 
-    log "${GREEN}[+] Scanning JS for secrets...${NC}"
+    log "${GREEN}[+] Scanning JS for secrets with secretfinder...${NC}"
     > "$output_dir/secrets.txt"
     while read -r js; do
-        echo "[JS] $js" >> "$output_dir/secrets.txt"
-        curl -s "$js" --connect-timeout 5 | grep -Ei "api[_-]?key|secret|token|authorization|bearer|access[_-]?token" >> "$output_dir/secrets.txt" 2>>"$output_dir/errors.log"
+        secretfinder -i "$js" -o cli >> "$output_dir/secrets_tmp.txt" 2>>"$output_dir/errors.log"
     done < "$js_file"
-    count=$(grep -c '^[JS]' "$output_dir/secrets.txt" 2>/dev/null || echo 0)
+    if [ -f "$output_dir/secrets_tmp.txt" ]; then
+        cat "$output_dir/secrets_tmp.txt" | grep -v "Checking URL" | grep -E "\[.*\]" >> "$output_dir/secrets.txt"
+        rm -f "$output_dir/secrets_tmp.txt"
+    fi
+    count=$(grep -c '^\[' "$output_dir/secrets.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count potential secrets${NC}"
     chmod 600 "$output_dir/secrets.txt"
 }
@@ -301,7 +329,7 @@ enumerate_directories() {
             cat "$output_dir/dirs_tmp.txt" >> "$output_dir/dirs.txt"
             rm -f "$output_dir/dirs_tmp.txt"
         fi
-        sleep 1 # Rate limiting
+        sleep 1
     done < "$live_file"
     count=$(wc -l < "$output_dir/dirs.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count directories${NC}"
@@ -358,9 +386,43 @@ scan_github_for_secrets() {
 
     check_github_token
     log "${GREEN}[+] Scanning GitHub for secrets...${NC}"
-    timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" trufflehog github --repo https://github.com/search?q="$domain" --json > "$output_dir/trufflehog_output.json" 2>>"$output_dir/errors.log" || log "${YELLOW}[-] TruffleHog scan failed${NC}"
-    count=$(grep -c '"DetectorName"' "$output_dir/trufflehog_output.json" 2>/dev/null || echo 0)
-    log "${GREEN}[+] Found $count secrets${NC}"
+    > "$output_dir/repos.txt"
+    > "$output_dir/trufflehog_output.json"
+
+    # Find repositories related to the domain
+    timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" github-search -t "$GITHUB_TOKEN" repos "$domain" > "$output_dir/repos_raw.txt" 2>>"$output_dir/errors.log"
+    if [ -s "$output_dir/repos_raw.txt" ]; then
+        grep "https://github.com/[^/]\+/[^/]\+" "$output_dir/repos_raw.txt" | head -n 10 > "$output_dir/repos.txt"
+    fi
+    rm -f "$output_dir/repos_raw.txt"
+
+    local repo_count
+    repo_count=$(wc -l < "$output_dir/repos.txt" 2>/dev/null || echo 0)
+    if [ "$repo_count" -eq 0 ]; then
+        log "${YELLOW}[-] No GitHub repositories found for $domain${NC}"
+        return
+    fi
+    log "${GREEN}[+] Found $repo_count repositories related to $domain${NC}"
+
+    # Scan each repository with trufflehog
+    local secret_count=0
+    while read -r repo; do
+        log "${GREEN}[+] Scanning repository $repo...${NC}"
+        for attempt in {1..2}; do
+            if timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" trufflehog github --repo "$repo" --json --concurrency 1 >> "$output_dir/trufflehog_output.json" 2>>"$output_dir/errors.log"; then
+                break
+            else
+                log "${YELLOW}[-] TruffleHog scan failed for $repo (attempt $attempt). Retrying after 10 seconds...${NC}"
+                sleep 10
+            fi
+        done
+    done < "$output_dir/repos.txt"
+
+    secret_count=$(grep -c '"DetectorName"' "$output_dir/trufflehog_output.json" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $secret_count secrets in $repo_count repositories${NC}"
+    if [ "$secret_count" -eq 0 ]; then
+        log "${YELLOW}[-] No secrets found in scanned repositories${NC}"
+    fi
     chmod 600 "$output_dir/trufflehog_output.json"
 }
 
@@ -378,7 +440,7 @@ generate_report() {
     echo "Security headers analyzed: $(wc -l < "$output_dir/headers.txt" 2>/dev/null || echo 0)" >> "$report"
     echo "Open ports found: $(wc -l < "$output_dir/ports.txt" 2>/dev/null || echo 0)" >> "$report"
     echo "JS files extracted: $(wc -l < "$output_dir/js_files.txt" 2>/dev/null || echo 0)" >> "$report"
-    echo "Secrets found in JS: $(grep -c '^[JS]' "$output_dir/secrets.txt" 2>/dev/null || echo 0)" >> "$report"
+    echo "Secrets found in JS: $(grep -c '^\[' "$output_dir/secrets.txt" 2>/dev/null || echo 0)" >> "$report"
     echo "Directories found: $(wc -l < "$output_dir/dirs.txt" 2>/dev/null || echo 0)" >> "$report"
     echo "Historical URLs collected: $(wc -l < "$output_dir/all_urls.txt" 2>/dev/null || echo 0)" >> "$report"
     echo "GF matches:" >> "$report"
@@ -403,6 +465,7 @@ generate_report() {
     echo "- gf_matches/: Param fuzzing sets" >> "$report"
     echo "- github_endpoints.txt: GitHub endpoints" >> "$report"
     echo "- trufflehog_output.json: GitHub secrets" >> "$report"
+    echo "- repos.txt: Scanned GitHub repositories" >> "$report"
     echo "- recon.log: Execution log" >> "$report"
     echo "- errors.log: Error log" >> "$report"
     log "${GREEN}[+] Report saved to $report${NC}"
@@ -482,6 +545,7 @@ log "- all_urls.txt       → Historical URLs"
 log "- gf_matches/*.txt   → Param fuzzing sets"
 log "- github_endpoints.txt → GitHub endpoints"
 log "- trufflehog_output.json → GitHub secrets"
+log "- repos.txt          → Scanned GitHub repositories"
 log "- recon.log          → Execution log"
 log "- errors.log         → Error log"
 
