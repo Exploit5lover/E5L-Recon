@@ -25,11 +25,32 @@ VERBOSE=${VERBOSE:-true}
 RUN_AMASS=${RUN_AMASS:-false}
 RUN_GITHUB_SUBDOMAINS=${RUN_GITHUB_SUBDOMAINS:-true}
 RUN_CHECK_SUBDOMAIN_TAKEOVER=${RUN_CHECK_SUBDOMAIN_TAKEOVER:-true}
+RUN_RESOLVE_DNS=${RUN_RESOLVE_DNS:-true}
+RUN_CHECK_LIVE_SUBDOMAINS=${RUN_CHECK_LIVE_SUBDOMAINS:-true}
+RUN_CHECK_SECURITY_HEADERS=${RUN_CHECK_SECURITY_HEADERS:-true}
+RUN_SCAN_PORTS=${RUN_SCAN_PORTS:-true}
+RUN_EXTRACT_JS_FILES=${RUN_EXTRACT_JS_FILES:-true}
+RUN_SCAN_JS_FOR_SECRETS=${RUN_SCAN_JS_FOR_SECRETS:-true}
+RUN_ENUMERATE_DIRECTORIES=${RUN_ENUMERATE_DIRECTORIES:-true}
+RUN_COLLECT_HISTORICAL_URLS=${RUN_COLLECT_HISTORICAL_URLS:-true}
+RUN_FILTER_WITH_GF=${RUN_FILTER_WITH_GF:-true}
+RUN_EXTRACT_GITHUB_ENDPOINTS=${RUN_EXTRACT_GITHUB_ENDPOINTS:-true}
+RUN_SCAN_GITHUB_FOR_SECRETS=${RUN_SCAN_GITHUB_FOR_SECRETS:-true}
+RUN_FUZZ_PARAMETERS=${RUN_FUZZ_PARAMETERS:-true} # New
+RUN_WAF_DETECTION=${RUN_WAF_DETECTION:-true} # New
+RUN_SCREENSHOT=${RUN_SCREENSHOT:-false} # New
+RUN_SUBDOMAIN_TAKEOVER_CHECK=${RUN_SUBDOMAIN_TAKEOVER_CHECK:-true} #check subs
+
+# Output directory (with target domain)
+OUTPUT_DIR="recon_${TARGET_DOMAIN}_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUTPUT_DIR"
+
 
 # ========== COLORS ==========
 GREEN="\033[1;32m"
 RED="\033[1;31m"
 YELLOW="\033[1;33m"
+BLUE="\033[1;34m"
 NC="\033[0m"
 
 # ========== FUNCTIONS ==========
@@ -43,7 +64,7 @@ log() {
 
 error() {
     echo -e "${RED}[-] $1${NC}" | tee -a "$OUTPUT_DIR/errors.log"
-    exit 1
+    # exit 1 #removed exit, now it will try to go on
 }
 
 command_exists() {
@@ -55,7 +76,7 @@ install_go_tool() {
     local package=$2
     if ! command_exists "$tool"; then
         log "${YELLOW}[-] Installing $tool...${NC}"
-        go install "$package" || error "Failed to install $tool"
+        go install "$package" || { error "Failed to install $tool"; return 1; }
         export PATH=$PATH:$(go env GOPATH)/bin
         log "${GREEN}[+] $tool installed${NC}"
     fi
@@ -67,14 +88,22 @@ install_tools() {
     if [ "$RUN_AMASS" = "true" ]; then
         tools+=(amass)
     fi
+    if [ "$RUN_WAF_DETECTION" = "true" ]; then
+        tools+=(wafw00f)
+    fi
+    if [ "$RUN_SCREENSHOT" = "true" ]; then
+        tools+=(aquatone) # Add aquatone to the tools list
+    fi
 
     for tool in "${tools[@]}"; do
         if ! command_exists "$tool"; then
             case $tool in
                 subfinder)
                     install_go_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-                    mkdir -p ~/.config/subfinder
-                    echo -e "resolvers:\n  - 8.8.8.8\n  - 1.1.1.1\nsources:\n  - certspotter\n  - crtsh\n  - hackertarget" > ~/.config/subfinder/config.yaml
+                    if command_exists subfinder; then
+                        mkdir -p ~/.config/subfinder
+                        echo -e "resolvers:\n  - 8.8.8.8\n  - 1.1.1.1\nsources:\n  - certspotter\n  - crtsh\n  - hackertarget" > ~/.config/subfinder/config.yaml
+                    fi
                     ;;
                 assetfinder)
                     install_go_tool assetfinder github.com/tomnomnom/assetfinder@latest
@@ -96,11 +125,13 @@ install_tools() {
                     ;;
                 gf)
                     install_go_tool gf github.com/tomnomnom/gf@latest
-                    if [ ! -d ~/.gf ]; then
-                        git clone https://github.com/1ndianl33t/Gf-Patterns /tmp/Gf-Patterns
-                        mkdir -p ~/.gf
-                        cp /tmp/Gf-Patterns/*.json ~/.gf/
-                        rm -rf /tmp/Gf-Patterns
+                    if command_exists gf; then
+                        if [ ! -d ~/.gf ]; then
+                            git clone https://github.com/1ndianl33t/Gf-Patterns /tmp/Gf-Patterns
+                            mkdir -p ~/.gf
+                            cp /tmp/Gf-Patterns/*.json ~/.gf/
+                            rm -rf /tmp/Gf-Patterns
+                        fi
                     fi
                     ;;
                 github-subdomains)
@@ -111,8 +142,10 @@ install_tools() {
                     ;;
                 subjack)
                     install_go_tool subjack github.com/haccer/subjack@latest
-                    # Download latest fingerprints for subjack
-                    curl -s https://raw.githubusercontent.com/haccer/subjack/master/fingerprints.json -o ~/.subjack/fingerprints.json || log "${YELLOW}[-] Failed to download subjack fingerprints${NC}"
+                    if command_exists subjack; then
+                        # Download latest fingerprints for subjack
+                        curl -s https://raw.githubusercontent.com/haccer/subjack/master/fingerprints.json -o ~/.subjack/fingerprints.json || log "${YELLOW}[-] Failed to download subjack fingerprints${NC}"
+                    fi
                     ;;
                 dnsx)
                     install_go_tool dnsx github.com/projectdiscovery/dnsx/cmd/dnsx@latest
@@ -124,11 +157,25 @@ install_tools() {
                     if [ ! -d /opt/dirsearch ]; then
                         log "${YELLOW}[-] Installing dirsearch...${NC}"
                         git clone https://github.com/maurosoria/dirsearch.git /opt/dirsearch
-                        pip3 install -r /opt/dirsearch/requirements.txt || error "Failed to install dirsearch"
+                        pip3 install -r /opt/dirsearch/requirements.txt || { error "Failed to install dirsearch"; return 1; }
                         ln -s /opt/dirsearch/dirsearch.py /usr/local/bin/dirsearch
                         log "${GREEN}[+] dirsearch installed${NC}"
                     fi
                     ;;
+                 wafw00f)
+                    if ! command_exists wafw00f; then
+                        log "${YELLOW}[-] Installing wafw00f...${NC}"
+                        pip3 install wafw00f || { error "Failed to install wafw00f.  Make sure you have python3-pip installed."; return 1; }
+                        log "${GREEN}[+] wafw00f installed${NC}"
+                    fi
+                    ;;
+                aquatone) #install aquatone
+                   if ! command_exists aquatone; then
+                        log "${YELLOW}[-] Installing aquatone...${NC}"
+                        gem install aquatone || { error "Failed to install aquatone.  Make sure you have Ruby and RubyGems installed."; return 1; }
+                        log "${GREEN}[+] aquatone installed${NC}"
+                   fi
+                   ;;
             esac
         fi
     done
@@ -136,20 +183,20 @@ install_tools() {
     if ! command_exists gh; then
         log "${YELLOW}[-] Installing GitHub CLI (gh)...${NC}"
         sudo apt update
-        sudo apt install -y gh || error "Failed to install GitHub CLI (gh)"
+        sudo apt install -y gh || { error "Failed to install GitHub CLI (gh)"; return 1; }
         log "${GREEN}[+] GitHub CLI (gh) installed${NC}"
     fi
 
     if ! command_exists trufflehog; then
         log "${YELLOW}[-] Installing trufflehog...${NC}"
-        pip3 install trufflehog >/dev/null 2>&1 || error "Failed to install trufflehog"
+        pip3 install trufflehog >/dev/null 2>&1 || { error "Failed to install trufflehog"; return 1; }
         log "${GREEN}[+] trufflehog installed${NC}"
     fi
 
     if ! command_exists secretfinder; then
         log "${YELLOW}[-] Installing secretfinder...${NC}"
         git clone https://github.com/m4ll0k/SecretFinder.git /opt/secretfinder
-        pip3 install -r /opt/secretfinder/requirements.txt || error "Failed to install secretfinder"
+        pip3 install -r /opt/secretfinder/requirements.txt || { error "Failed to install secretfinder"; return 1; }
         ln -s /opt/secretfinder/secretfinder.py /usr/local/bin/secretfinder
         log "${GREEN}[+] secretfinder installed${NC}"
     fi
@@ -157,6 +204,7 @@ install_tools() {
     for tool in git curl grep; do
         if ! command_exists "$tool"; then
             error "$tool is required. Install it (e.g., sudo apt install $tool)"
+            return 1
         fi
     done
 }
@@ -164,20 +212,24 @@ install_tools() {
 check_github_token() {
     if [ -z "$GITHUB_TOKEN" ] || [ "$GITHUB_TOKEN" = "your_personal_access_token" ]; then
         error "GITHUB_TOKEN is not set or invalid in config.sh. Set a valid token in config.sh (GitHub > Settings > Developer settings > Personal access tokens, enable 'repo' scope)."
+        return 1
     fi
     if ! echo "$GITHUB_TOKEN" | grep -q "^github_pat_"; then
         error "Invalid GITHUB_TOKEN format in config.sh. It should start with 'github_pat_'."
+        return 1
     fi
     # Test token validity and rate limit
     local response
     response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user)
     if echo "$response" | grep -q '"message": "Bad credentials"'; then
         error "GITHUB_TOKEN is invalid. Generate a new token with 'repo' scope in GitHub > Settings > Developer settings > Personal access tokens."
+        return 1
     fi
     local rate_limit
     rate_limit=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/rate_limit | grep '"remaining":' | head -1 | awk '{print $2}' | tr -d ',')
     if [ "$rate_limit" -eq 0 ]; then
         error "GITHUB_TOKEN rate limit exceeded. Wait for reset or use a different token."
+        return 1
     fi
     log "${GREEN}[+] GITHUB_TOKEN validated. Rate limit remaining: $rate_limit requests${NC}"
 }
@@ -187,6 +239,7 @@ enumerate_subdomains() {
     local output_dir=$2
 
     log "${GREEN}[+] Enumerating subdomains for $domain...${NC}"
+    local subdomains_found=0
     > "$output_dir/subs_subfinder.txt"
     > "$output_dir/subs_assetfinder.txt"
     > "$output_dir/subs_github.txt"
@@ -210,7 +263,7 @@ enumerate_subdomains() {
 
     wait
 
-    if [ "$RUN_AMASS" = "true" ] && [ -f "$output_dir/subs_amass_raw.txt" ]; then
+     if [ "$RUN_AMASS" = "true" ] && [ -f "$output_dir/subs_amass_raw.txt" ]; then
         grep -E "^[a-zA-Z0-9.-]+\.${domain}$" "$output_dir/subs_amass_raw.txt" > "$output_dir/subs_amass.txt" 2>>"$output_dir/errors.log"
         rm -f "$output_dir/subs_amass_raw.txt"
     fi
@@ -220,8 +273,12 @@ enumerate_subdomains() {
             count=$(wc -l < "$file")
             tool=$(basename "$file" | sed 's/subs_//;s/\.txt//')
             log "${GREEN}[+] Found $count subdomains with $tool${NC}"
+            subdomains_found=$((subdomains_found + count))
         fi
     done
+    if [ "$subdomains_found" -eq 0 ]; then
+        log "${YELLOW}[-] No subdomains found by enumeration tools${NC}"
+    fi
 
     log "${GREEN}[+] Combining and deduplicating subdomains...${NC}"
     cat "$output_dir/subs_"*".txt" 2>/dev/null | sort -u -S 50M > "$output_dir/subs.txt" 2>>"$output_dir/errors.log"
@@ -275,7 +332,7 @@ check_live_subdomains() {
     fi
 
     log "${GREEN}[+] Checking live subdomains...${NC}"
-    cat "$subs_file" | httpx -silent -mc 200,302,403 > "$output_dir/live.txt" 2>>"$output_dir/errors.log"
+    cat "$subs_file" | httpx -silent -mc 200,302,403,204 -timeout 10 > "$output_dir/live.txt" 2>>"$output_dir/errors.log"
     count=$(wc -l < "$output_dir/live.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count live hosts${NC}"
 }
@@ -290,7 +347,7 @@ check_security_headers() {
     fi
 
     log "${GREEN}[+] Checking security headers...${NC}"
-    cat "$live_file" | httpx -silent -sc -cl > "$output_dir/headers.txt" 2>>"$output_dir/errors.log"
+    cat "$live_file" | httpx -silent -sc -cl -hdr 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36' > "$output_dir/headers.txt" 2>>"$output_dir/errors.log"
     count=$(wc -l < "$output_dir/headers.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Analyzed headers for $count hosts${NC}"
 }
@@ -305,7 +362,8 @@ scan_ports() {
     fi
 
     log "${GREEN}[+] Scanning ports on live hosts...${NC}"
-    cat "$live_file" | naabu -silent -p 80,443,8080 > "$output_dir/ports.txt" 2>>"$output_dir/errors.log"
+    # Consider adding -Pn for hosts that don't respond to ping
+    cat "$live_file" | naabu -silent -p 80,443,8080,21,22,23,25,3389,110,143,445,3306,5432,5900,8000,8080,8443,8888 -n -top-ports 100 > "$output_dir/ports.txt" 2>>"$output_dir/errors.log"
     count=$(wc -l < "$output_dir/ports.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found open ports on $count hosts${NC}"
 }
@@ -320,7 +378,7 @@ extract_js_files() {
     fi
 
     log "${GREEN}[+] Extracting JS files with katana...${NC}"
-    cat "$live_file" | katana -silent -c 10 -d 5 -js-crawl -delay 100ms -f url | grep -Ei "\.js(\?|$)" > "$output_dir/js_files.txt" 2>>"$output_dir/errors.log"
+    cat "$live_file" | katana -silent -c 25 -d 5 -js-crawl -delay 100ms -f url | grep -Ei "\.js(\?|$)" > "$output_dir/js_files.txt" 2>>"$output_dir/errors.log"
     count=$(wc -l < "$output_dir/js_files.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count JS files${NC}"
     if [ "$count" -eq 0 ]; then
@@ -340,7 +398,7 @@ scan_js_for_secrets() {
     log "${GREEN}[+] Scanning JS for secrets with secretfinder...${NC}"
     > "$output_dir/secrets.txt"
     while read -r js; do
-        secretfinder -i "$js" -o cli >> "$output_dir/secrets_tmp.txt" 2>>"$output_dir/errors.log"
+        timeout 120 secretfinder -i "$js" -o cli >> "$output_dir/secrets_tmp.txt" 2>>"$output_dir/errors.log"
     done < "$js_file"
     if [ -f "$output_dir/secrets_tmp.txt" ]; then
         cat "$output_dir/secrets_tmp.txt" | grep -v "Checking URL" | grep -E "\[.*\]" >> "$output_dir/secrets.txt"
@@ -363,7 +421,7 @@ enumerate_directories() {
     log "${GREEN}[+] Enumerating directories...${NC}"
     > "$output_dir/dirs.txt"
     while read -r url; do
-        dirsearch -u "$url" -e php,asp,aspx,js,html -t 10 --simple-report="$output_dir/dirs_tmp.txt" 2>>"$output_dir/errors.log"
+        timeout 180 dirsearch -u "$url" -e php,asp,aspx,js,html,txt,xml,json -t 20 --simple-report="$output_dir/dirs_tmp.txt" -x 400,403,404,405,500,503 2>>"$output_dir/errors.log"
         if [ -f "$output_dir/dirs_tmp.txt" ]; then
             cat "$output_dir/dirs_tmp.txt" >> "$output_dir/dirs.txt"
             rm -f "$output_dir/dirs_tmp.txt"
@@ -400,7 +458,7 @@ filter_with_gf() {
 
     log "${GREEN}[+] Filtering URLs with GF patterns...${NC}"
     mkdir -p "$output_dir/gf_matches"
-    patterns=(xss sqli ssrf redirect lfi idor)
+    patterns=(xss sqli ssrf redirect lfi idor open-redirect subdomain-takeover) # Added more patterns
     for p in "${patterns[@]}"; do
         cat "$urls_file" | gf "$p" > "$output_dir/gf_matches/$p.txt" 2>>"$output_dir/errors.log"
         count=$(wc -l < "$output_dir/gf_matches/$p.txt" 2>/dev/null || echo 0)
@@ -435,7 +493,7 @@ scan_github_for_secrets() {
     }
 
     # Find repositories related to the domain
-    timeout 300 gh search repos "$domain" --limit 10 --json html_url --jq '.[].html_url' > "$output_dir/repos.txt" 2>>"$output_dir/errors.log"
+    timeout 300 gh search repos "$domain" --limit 30 --json html_url --jq '.[].html_url' > "$output_dir/repos.txt" 2>>"$output_dir/errors.log"
     local repo_count
     repo_count=$(wc -l < "$output_dir/repos.txt" 2>/dev/null || echo 0)
     if [ "$repo_count" -eq 0 ]; then
@@ -466,6 +524,55 @@ scan_github_for_secrets() {
     chmod 600 "$output_dir/trufflehog_output.json"
 }
 
+# New function to fuzz parameters
+fuzz_parameters() {
+    local urls_file=$1
+    local output_dir=$2
+
+    if [ ! -f "$urls_file" ] || [ ! -s "$urls_file" ]; then
+        log "${YELLOW}[-] No URLs found for parameter fuzzing${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Fuzzing parameters with ffuf...${NC}"
+    mkdir -p "$output_dir/fuzz_results"
+    while read -r url; do
+        # Basic parameter fuzzing, you can expand the wordlist
+        timeout 120 ffuf -u "$url?FUZZ=test" -w /usr/share/wordlists/ SecLists/Discovery/Web-Content/burp-parameter-names.txt -t 10 -p 0.5 -o "$output_dir/fuzz_results/$(echo "$url" | sed 's/https\?:\/\///g; s/[\/.]/_/g').txt" 2>>"$output_dir/errors.log"
+    done < "$urls_file"
+    log "${GREEN}[+] Parameter fuzzing complete. Results in $output_dir/fuzz_results/${NC}"
+}
+
+# New function to detect WAF
+detect_waf() {
+    local target=$1
+    local output_dir=$2
+
+    log "${GREEN}[+] Detecting WAF...${NC}"
+    timeout 60 wafw00f "$target" > "$output_dir/waf_detection.txt" 2>>"$output_dir/errors.log"
+    if grep -q "Identified WAF" "$output_dir/waf_detection.txt"; then
+        waf=$(grep "Identified WAF" "$output_dir/waf_detection.txt" | awk '{print $4}')
+        log "${GREEN}[+] WAF Detected: $waf${NC}"
+    else
+        log "${YELLOW}[-] WAF not detected${NC}"
+    fi
+}
+# New function for taking screenshots
+take_screenshots() {
+    local live_file=$1
+    local output_dir=$2
+
+    if [ ! -f "$live_file" ] || [ ! -s "$live_file" ]; then
+        log "${YELLOW}[-] No live hosts found for taking screenshots${NC}"
+        return
+    fi
+
+    log "${GREEN}[+] Taking screenshots of live hosts...${NC}"
+    mkdir -p "$output_dir/screenshots"
+    cat "$live_file" | aquatone -out "$output_dir/screenshots" -screenshot 2>>"$output_dir/errors.log" # Capture screenshots
+    log "${GREEN}[+] Screenshots saved in $output_dir/screenshots${NC}"
+}
+
 generate_report() {
     local output_dir=$1
 
@@ -492,29 +599,44 @@ generate_report() {
     done
     echo "GitHub endpoints found: $(wc -l < "$output_dir/github_endpoints.txt" 2>/dev/null || echo 0)" >> "$report"
     echo "GitHub secrets found: $(grep -c '"DetectorName"' "$output_dir/trufflehog_output.json" 2>/dev/null || echo 0)" >> "$report"
+    if [ "$RUN_WAF_DETECTION" = "true" ]; then
+        if grep -q "Identified WAF" "$output_dir/waf_detection.txt"; then
+            waf=$(grep "Identified WAF" "$output_dir/waf_detection.txt" | awk '{print $4}')
+            echo "WAF Detected: $waf" >> "$report"
+        else
+            echo "WAF Status: Not detected" >> "$report"
+        fi
+    fi
     echo "" >> "$report"
     echo "Check the following files for detailed results:" >> "$report"
-    echo "- subs.txt: Subdomains" >> "$report"
-    echo "- takeovers.txt: Subdomain takeovers" >> "$report"
-    echo "- dns.txt: DNS resolutions" >> "$report"
-    echo "- live.txt: Live hosts" >> "$report"
-    echo "- headers.txt: Security headers" >> "$report"
-    echo "- ports.txt: Open ports" >> "$report"
-    echo "- js_files.txt: JavaScript files" >> "$report"
-    echo "- secrets.txt: Secrets in JS" >> "$report"
-    echo "- dirs.txt: Directories" >> "$report"
-    echo "- all_urls.txt: Historical URLs" >> "$report"
-    echo "- gf_matches/: Param fuzzing sets" >> "$report"
-    echo "- github_endpoints.txt: GitHub endpoints" >> "$report"
-    echo "- trufflehog_output.json: GitHub secrets" >> "$report"
-    echo "- repos.txt: Scanned GitHub repositories" >> "$report"
-    echo "- recon.log: Execution log" >> "$report"
-    echo "- errors.log: Error log" >> "$report"
+    echo "- subs.txt           → Subdomains" >> "$report"
+    echo "- takeovers.txt      → Subdomain takeovers" >> "$report"
+    echo "- dns.txt            → DNS resolutions" >> "$report"
+    echo "- live.txt           → Live hosts" >> "$report"
+    echo "- headers.txt        → Security headers" >> "$report"
+    echo "- ports.txt          → Open ports" >> "$report"
+    echo "- js_files.txt       → JavaScript files" >> "$report"
+    echo "- secrets.txt        → Secrets in JS" >> "$report"
+    echo "- dirs.txt           → Directories" >> "$report"
+    echo "- all_urls.txt       → Historical URLs" >> "$report"
+    echo "- gf_matches/       → GF matches" >> "$report"
+    echo "- github_endpoints.txt → GitHub endpoints" >> "$report"
+    echo "- trufflehog_output.json → GitHub secrets" >> "$report"
+    echo "- repos.txt          → Scanned GitHub repositories" >> "$report"
+    echo "- fuzz_results/      → Fuzzing results" >> "$report" #new
+    echo "- waf_detection.txt  → WAF detection output" >> "$report" #new
+    if [ "$RUN_SCREENSHOT" = "true" ]; then #new
+        echo "- screenshots/       → Screenshots of live hosts" >> "$report" #new
+    fi
+    echo "- report.txt         → Summary report" >> "$report"
+    echo "- recon.log          → Execution log" >> "$report"
+    echo "- errors.log         → Error log" >> "$report"
     log "${GREEN}[+] Report saved to $report${NC}"
     chmod 600 "$report"
 }
 
 # ========== MAIN WORKFLOW ==========
+# Create the output directory with the target name and timestamp
 mkdir -p "$OUTPUT_DIR"
 touch "$OUTPUT_DIR/recon.log" "$OUTPUT_DIR/errors.log"
 chmod 600 "$OUTPUT_DIR/recon.log" "$OUTPUT_DIR/errors.log"
@@ -572,6 +694,16 @@ fi
 if [ "${RUN_SCAN_GITHUB_FOR_SECRETS}" = "true" ]; then
     scan_github_for_secrets "$TARGET_DOMAIN" "$OUTPUT_DIR"
 fi
+if [ "${RUN_FUZZ_PARAMETERS}" = "true" ]; then # New
+    fuzz_parameters "$OUTPUT_DIR/all_urls.txt" "$OUTPUT_DIR" # New
+fi
+
+if [ "${RUN_WAF_DETECTION}" = "true" ]; then # New
+    detect_waf "$TARGET_DOMAIN" "$OUTPUT_DIR" # New
+fi
+if [ "${RUN_SCREENSHOT}" = "true" ]; then # New
+    take_screenshots "$OUTPUT_DIR/live.txt" "$OUTPUT_DIR" # New
+fi
 
 generate_report "$OUTPUT_DIR"
 
@@ -589,10 +721,16 @@ log "- js_files.txt       → JavaScript files"
 log "- secrets.txt        → Secrets in JS"
 log "- dirs.txt           → Directories"
 log "- all_urls.txt       → Historical URLs"
-log "- gf_matches/*.txt   → Param fuzzing sets"
+log "- gf_matches/       → GF matches"
 log "- github_endpoints.txt → GitHub endpoints"
 log "- trufflehog_output.json → GitHub secrets"
 log "- repos.txt          → Scanned GitHub repositories"
+log "- fuzz_results/      → Fuzzing results" # New
+log "- waf_detection.txt  → WAF detection output" # New
+if [ "$RUN_SCREENSHOT" = "true" ]; then # New
+    log "- screenshots/       → Screenshots of live hosts" # New
+fi
+log "- report.txt         → Summary report"
 log "- recon.log          → Execution log"
 log "- errors.log         → Error log"
 
