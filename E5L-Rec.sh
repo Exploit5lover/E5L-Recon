@@ -281,7 +281,7 @@ check_subdomain_takeover() {
     fi
 
     log "${GREEN}[+] Checking for subdomain takeovers...${NC}"
-    subjack -f "$subs_file" -c 10 -t 10 -o "$output_dir/takeovers.txt" -ssl -a 2>>"$output_dir/errors.log"
+    subjack -w "$subs_file" -t 10 -timeout 30 -ssl -c fingerprints.json -o "$output_dir/takeovers.txt" -ssl -a 2>>"$output_dir/errors.log"
     count=$(grep -c "Vulnerable" "$output_dir/takeovers.txt" 2>/dev/null || echo 0)
     if [ "$count" -eq 0 ]; then
         log "${YELLOW}[-] No subdomain takeovers found${NC}"
@@ -318,7 +318,7 @@ check_live_subdomains() {
     fi
 
     log "${GREEN}[+] Checking live subdomains...${NC}"
-    cat "$subs_file" | httpx -silent -mc 200,302,403 -timeout 10 > "$output_dir/live.txt" 2>>"$output_dir/errors.log"
+   httpx -l "$subs_file" -silent -mc 200,302,403 -timeout 10 > "$output_dir/live.txt" 2>>"$output_dir/errors.log"
     count=$(wc -l < "$output_dir/live.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count live hosts${NC}"
 }
@@ -487,7 +487,7 @@ scan_github_for_secrets() {
     }
 
     # Find repositories related to the domain
-    timeout 300 gh search repos "$domain" --limit 10 --json html_url --jq '.[].html_url' > "$output_dir/repos.txt" 2>>"$output_dir/errors.log"
+   timeout 300 gh search repos "$domain" --limit 10 --json url --jq '.[].url' > "$output_dir/repos.txt" 2>>"$output_dir/errors.log"
     local repo_count
     repo_count=$(wc -l < "$output_dir/repos.txt" 2>/dev/null || echo 0)
     if [ "$repo_count" -eq 0 ]; then
