@@ -237,7 +237,7 @@ enumerate_subdomains() {
 
     if [ "$RUN_GITHUB_SUBDOMAINS" = "true" ]; then
         check_github_token
-        timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" github-subdomains -d "$domain" > "$output_dir/subs_github.txt" 2>>"$output_dir/errors.log" &
+        timeout 300 env GITHUB_TOKEN="$GITHUB_TOKEN" github-subdomains -d "$domain" > "$output_dir/subs_github.txt" 2>>"$output_dir/errors.log" &
         log "${GREEN}[+] Running github-subdomains...${NC}"
     fi
 
@@ -281,7 +281,7 @@ check_subdomain_takeover() {
     fi
 
     log "${GREEN}[+] Checking for subdomain takeovers...${NC}"
-    subjack -w "$subs_file" -t 10 -timeout 30 -ssl -c fingerprints.json -o "$output_dir/takeovers.txt" -ssl -a 2>>"$output_dir/errors.log"
+    subjack -w "$subs_file" -t 10 -timeout 30 -ssl -c ~/.subjack/fingerprints.json -o "$output_dir/takeovers.txt" -a 2>>"$output_dir/errors.log"
     count=$(grep -c "Vulnerable" "$output_dir/takeovers.txt" 2>/dev/null || echo 0)
     if [ "$count" -eq 0 ]; then
         log "${YELLOW}[-] No subdomain takeovers found${NC}"
@@ -333,7 +333,7 @@ check_security_headers() {
     fi
 
     log "${GREEN}[+] Checking security headers...${NC}"
-    cat "$live_file" | httpx -silent -sc -cl -hdr 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36' > "$output_dir/headers.txt" 2>>"$output_dir/errors.log"
+   cat "$live_file" | httpx -silent -sc -cl -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36' > "$output_dir/headers.txt" 2>>"$output_dir/errors.log"
     count=$(wc -l < "$output_dir/headers.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Analyzed headers for $count hosts${NC}"
 }
@@ -466,7 +466,7 @@ extract_github_endpoints() {
 
     check_github_token
     log "${GREEN}[+] Extracting GitHub endpoints...${NC}"
-    timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" github-endpoints -d "$domain" > "$output_dir/github_endpoints.txt" 2>>"$output_dir/errors.log"
+    timeout 300 env GITHUB_TOKEN="$GITHUB_TOKEN" github-endpoints -d "$domain" > "$output_dir/github_endpoints.txt" 2>>"$output_dir/errors.log"
     count=$(wc -l < "$output_dir/github_endpoints.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count endpoints${NC}"
 }
@@ -501,7 +501,7 @@ scan_github_for_secrets() {
     while read -r repo; do
         log "${GREEN}[+] Scanning repository $repo...${NC}"
         for attempt in {1..2}; do
-            if timeout 300 GITHUB_TOKEN="$GITHUB_TOKEN" trufflehog github --repo "$repo" --json --concurrency 1 >> "$output_dir/trufflehog_output.json" 2>>"$output_dir/errors.log"; then
+            if timeout 300 env GITHUB_TOKEN="$GITHUB_TOKEN" trufflehog github --repo "$repo" --json --concurrency 1 >> "$output_dir/trufflehog_output.json" 2>>"$output_dir/errors.log"; then
                 break
             else
                 log "${YELLOW}[-] TruffleHog scan failed for $repo (attempt $attempt). Retrying after 10 seconds...${NC}"
