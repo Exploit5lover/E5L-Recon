@@ -435,10 +435,16 @@ collect_historical_urls() {
         return
     fi
 
-    log "${GREEN}[+] Collecting historical URLs...${NC}"
-    (cat "$subs_file" | timeout 300 gau && cat "$subs_file" | timeout 300 waybackurls) 2>>"$output_dir/errors.log" | sort -u -S 50M > "$output_dir/all_urls.txt"
-    count=$(wc -l < "$output_dir/all_urls.txt" 2>/dev/null || echo 0)
-    log "${GREEN}[+] Found $count URLs${NC}"
+   log "${GREEN}[+] Collecting historical URLs...${NC}"
+
+{
+  timeout 300 gau < "$subs_file"
+  timeout 300 waybackurls < "$subs_file"
+} 2>>"$output_dir/errors.log" | sort -u -S 50M > "$output_dir/all_urls.txt"
+
+count=$(wc -l < "$output_dir/all_urls.txt" 2>/dev/null || echo 0)
+log "${GREEN}[+] Found $count URLs${NC}"
+
 }
 
 filter_with_gf() {
@@ -501,7 +507,7 @@ scan_github_for_secrets() {
     while read -r repo; do
         log "${GREEN}[+] Scanning repository $repo...${NC}"
         for attempt in {1..2}; do
-            if timeout 300 env GITHUB_TOKEN="$GITHUB_TOKEN" trufflehog github --repo "$repo" --json --concurrency 1 >> "$output_dir/trufflehog_output.json" 2>>"$output_dir/errors.log"; then
+            if timeout 300 env GITHUB_TOKEN="$GITHUB_TOKEN" trufflehog github --repo "$repo" --only-verified --json  >> "$output_dir/trufflehog_output.json" 2>>"$output_dir/errors.log"; then
                 break
             else
                 log "${YELLOW}[-] TruffleHog scan failed for $repo (attempt $attempt). Retrying after 10 seconds...${NC}"
