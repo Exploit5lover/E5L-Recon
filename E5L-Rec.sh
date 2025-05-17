@@ -355,51 +355,74 @@ scan_ports() {
 }
 
 extract_js_files() {
-    local live_file=$1
-    local output_dir=$2
+    local live_file="$1"
+    local output_dir="$2"
 
     if [ ! -f "$live_file" ] || [ ! -s "$live_file" ]; then
         log "${YELLOW}[-] No live hosts found for JS extraction${NC}"
         return
     fi
 
-    log "${GREEN}[+] Extracting JS files with katana...${NC}"
-    cat "$live_file" | katana -silent -c 25 -d 5 -js-crawl -delay 100ms -f url | grep -Ei "\.js(\?|$)" > "$output_dir/js_files.txt" 2>>"$output_dir/errors.log"
-    count=$(wc -l < "$output_dir/js_files.txt" 2>/dev/null || echo 0)
-    log "${GREEN}[+] Found $count JS files${NC}"
-    if [ "$count" -eq 0 ]; then
-        log "${YELLOW}[-] No JS files found. Possible issues: anti-crawling measures, network errors, or insufficient memory. Check errors.log.  Trying without -js-crawl...${NC}"
-        cat "$live_file" | katana -silent -c 25  -d 5  -delay 100ms -f url | grep -Ei "\.js(\?|$)" > "$output_dir/js_files.txt" 2>>"$output_dir/errors.log"
-        count=$(wc -l < "$output_dir/js_files.txt" 2>/dev/null || echo 0)
-        log "${GREEN}[+] Found $count JS files${NC}"
-        if [ "$count" -eq 0 ]; then
-            log "${YELLOW}[-] No JS files found after retry.  Check errors.log for katana errors.${NC}"
+    log "${GREEN}[+] Extracting JS files with katana (active crawling)...${NC}"
+    katana -silent -c 25 -d 5 -js-crawl -delay 100ms -f url < "$live_file" | grep -Ei "\.js(\?|$)" > "$output_dir/js_katana.txt" 2>>"$output_dir/errors.log"
+
+    count_katana=$(wc -l < "$output_dir/js_katana.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count_katana JS files via katana${NC}"
+
+    if [ "$count_katana" -eq 0 ]; then
+        log "${YELLOW}[-] No JS files found by katana. Retrying without -js-crawl...${NC}"
+        sleep 2
+        katana -silent -c 25 -d 5 -delay 100ms -f url < "$live_file" | grep -Ei "\.js(\?|$)" > "$output_dir/js_katana.txt" 2>>"$output_dir/errors.log"
+        count_katana=$(wc -l < "$output_dir/js_katana.txt" 2>/dev/null || echo 0)
+        log "${GREEN}[+] Found $count_katana JS files via katana retry${NC}"
+        if [ "$count_katana" -eq 0 ]; then
+            log "${YELLOW}[-] Still no JS files from katana. Check errors.log.${NC}"
         fi
     fi
+
+    log "${GREEN}[+] Extracting JS files with waybackurls (passive)...${NC}"
+    waybackurls < "$live_file" | grep -Ei "\.js(\?|$)" > "$output_dir/js_wayback.txt" 2>>"$output_dir/errors.log"
+    count_wayback=$(wc -l < "$output_dir/js_wayback.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Found $count_wayback JS files via waybackurls${NC}"
+
+    # Merge, deduplicate, and save final result
+    cat "$output_dir/js_katana.txt" "$output_dir/js_wayback.txt" 2>/dev/null | sort -u > "$output_dir/js_files.txt"
+
+    # Cleanup temp files
+    rm -f "$output_dir/js_katana.txt" "$output_dir/js_wayback.txt"
+
+    count_total=$(wc -l < "$output_dir/js_files.txt" 2>/dev/null || echo 0)
+    log "${GREEN}[+] Total unique JS files: $count_total${NC}"
 }
 
 scan_js_for_secrets() {
-    local js_file=$1
-    local output_dir=$2
+    local js_file="$1"
+    local output_dir="$2"
 
     if [ ! -f "$js_file" ] || [ ! -s "$js_file" ]; then
         log "${YELLOW}[-] No JS files found for secret scanning${NC}"
         return
     fi
 
-    log "${GREEN}[+] Scanning JS for secrets with secretfinder...${NC}"
+    log "${GREEN}[+] Scanning JS for secrets with SecretFinder...${NC}"
     > "$output_dir/secrets.txt"
+    > "$output_dir/secrets_tmp.txt"
+
     while read -r js; do
+        [[ -z "$js" ]] && continue  # skip empty lines
         timeout 120 secretfinder -i "$js" -o cli >> "$output_dir/secrets_tmp.txt" 2>>"$output_dir/errors.log"
     done < "$js_file"
-    if [ -f "$output_dir/secrets_tmp.txt" ]; then
-        cat "$output_dir/secrets_tmp.txt" | grep -v "Checking URL" | grep -E "\[.*\]" >> "$output_dir/secrets.txt"
+
+    if [ -s "$output_dir/secrets_tmp.txt" ]; then
+        grep -v "Checking URL" "$output_dir/secrets_tmp.txt" | grep -E "^\[.*\]" | sort -u >> "$output_dir/secrets.txt"
         rm -f "$output_dir/secrets_tmp.txt"
     fi
+
     count=$(grep -c '^\[' "$output_dir/secrets.txt" 2>/dev/null || echo 0)
     log "${GREEN}[+] Found $count potential secrets${NC}"
-    if [ -f "$output_dir/secrets.txt" ]; then #check if file exists before changing permissions
-      chmod 600 "$output_dir/secrets.txt"
+
+    if [ "$count" -gt 0 ]; then
+        chmod 600 "$output_dir/secrets.txt"
     fi
 }
 
